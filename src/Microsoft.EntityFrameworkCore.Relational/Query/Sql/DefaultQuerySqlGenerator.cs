@@ -15,6 +15,7 @@ using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.EntityFrameworkCore.Utilities;
 using Remotion.Linq.Clauses;
 using Remotion.Linq.Parsing;
+// ReSharper disable SwitchStatementMissingSomeCases
 
 namespace Microsoft.EntityFrameworkCore.Query.Sql
 {
@@ -317,12 +318,15 @@ namespace Microsoft.EntityFrameworkCore.Query.Sql
             newExpression = new PredicateReductionExpressionOptimizer().Visit(newExpression);
             newExpression = new PredicateNegationExpressionOptimizer().Visit(newExpression);
             newExpression = new ReducingExpressionVisitor().Visit(newExpression);
+
             var searchConditionTranslatingVisitor = new SearchConditionTranslatingVisitor(searchCondition);
+
             newExpression = searchConditionTranslatingVisitor.Visit(newExpression);
 
             if (searchCondition && !SearchConditionTranslatingVisitor.IsSearchCondition(newExpression))
             {
                 var constantExpression = newExpression as ConstantExpression;
+
                 if ((constantExpression != null)
                     && (bool)constantExpression.Value)
                 {
@@ -1143,7 +1147,7 @@ namespace Microsoft.EntityFrameworkCore.Query.Sql
                           ?? parentTypeMapping;
                 }
 
-                var needParens = expression.Left is BinaryExpression;
+                var needParens = expression.Left.RemoveConvert() is BinaryExpression;
 
                 if (needParens)
                 {
@@ -1178,7 +1182,7 @@ namespace Microsoft.EntityFrameworkCore.Query.Sql
 
                 _relationalCommandBuilder.Append(op);
 
-                needParens = expression.Right is BinaryExpression;
+                needParens = expression.Right.RemoveConvert() is BinaryExpression;
 
                 if (needParens)
                 {
@@ -1415,6 +1419,7 @@ namespace Microsoft.EntityFrameworkCore.Query.Sql
                 case ExpressionType.Negate:
                 {
                     _relationalCommandBuilder.Append("-");
+
                     Visit(expression.Operand);
 
                     return expression;
@@ -1636,18 +1641,13 @@ namespace Microsoft.EntityFrameworkCore.Query.Sql
                     return false;
                 }
 
-                if (expression.IsComparisonOperation()
-                    || expression.IsLogicalOperation()
-                    || expression is LikeExpression
-                    || expression is IsNullExpression
-                    || expression is InExpression
-                    || expression is ExistsExpression
-                    || expression is StringCompareExpression)
-                {
-                    return true;
-                }
-
-                return false;
+                return expression.IsComparisonOperation()
+                       || expression.IsLogicalOperation()
+                       || expression is LikeExpression
+                       || expression is IsNullExpression
+                       || expression is InExpression
+                       || expression is ExistsExpression
+                       || expression is StringCompareExpression;
             }
 
             protected override Expression VisitBinary(BinaryExpression expression)
@@ -1659,9 +1659,12 @@ namespace Microsoft.EntityFrameworkCore.Query.Sql
                         || expression.NodeType == ExpressionType.And)
                     {
                         var parentIsSearchCondition = _isSearchCondition;
+
                         _isSearchCondition = false;
+
                         var left = Visit(expression.Left);
                         var right = Visit(expression.Right);
+
                         _isSearchCondition = parentIsSearchCondition;
 
                         return Expression.MakeBinary(expression.NodeType, left, right);
@@ -1671,14 +1674,18 @@ namespace Microsoft.EntityFrameworkCore.Query.Sql
                 {
                     Expression newLeft;
                     Expression newRight;
+
                     if (expression.IsLogicalOperation()
                         || expression.NodeType == ExpressionType.Or
                         || expression.NodeType == ExpressionType.And)
                     {
                         var parentIsSearchCondition = _isSearchCondition;
+
                         _isSearchCondition = expression.IsLogicalOperation();
+
                         newLeft = Visit(expression.Left);
                         newRight = Visit(expression.Right);
+
                         _isSearchCondition = parentIsSearchCondition;
                     }
                     else
@@ -1687,11 +1694,15 @@ namespace Microsoft.EntityFrameworkCore.Query.Sql
                         newRight = Visit(expression.Right);
                     }
 
-                    var newExpression = expression.Update(newLeft, expression.Conversion, newRight);
+                    var newExpression 
+                        = expression.Update(newLeft, expression.Conversion, newRight);
+                    
                     if (IsSearchCondition(newExpression))
                     {
                         return Expression.Condition(
-                            newExpression,
+                            newExpression.Type == typeof(bool)
+                                ? (Expression)newExpression
+                                : Expression.Convert(newExpression, typeof(bool)),
                             Expression.Constant(true, typeof(bool)),
                             Expression.Constant(false, typeof(bool)));
                     }
@@ -1703,11 +1714,16 @@ namespace Microsoft.EntityFrameworkCore.Query.Sql
             protected override Expression VisitConditional(ConditionalExpression expression)
             {
                 var parentIsSearchCondition = _isSearchCondition;
+
                 _isSearchCondition = true;
+
                 var test = Visit(expression.Test);
+
                 _isSearchCondition = false;
+
                 var ifTrue = Visit(expression.IfTrue);
                 var ifFalse = Visit(expression.IfFalse);
+
                 _isSearchCondition = parentIsSearchCondition;
 
                 var newExpression = Expression.Condition(test, ifTrue, ifFalse);
@@ -1719,12 +1735,14 @@ namespace Microsoft.EntityFrameworkCore.Query.Sql
                         newExpression,
                         Expression.Constant(true, typeof(bool)));
                 }
+
                 return newExpression;
             }
 
             protected override Expression VisitUnary(UnaryExpression expression)
             {
                 var parentIsSearchCondition = _isSearchCondition;
+
                 if (expression.NodeType == ExpressionType.Convert)
                 {
                     _isSearchCondition = false;
@@ -1748,33 +1766,40 @@ namespace Microsoft.EntityFrameworkCore.Query.Sql
                     if (expression.NodeType == ExpressionType.Not
                         && expression.Operand.IsSimpleExpression())
                     {
-                        return Expression.Equal(expression.Operand, Expression.Constant(false, typeof(bool)));
+                        return Expression.Equal(
+                            expression.Operand, 
+                            Expression.Constant(false, typeof(bool)));
                     }
 
                     if (expression.NodeType == ExpressionType.Convert
                         && operand.IsSimpleExpression())
                     {
-                        return Expression.Equal(
-                            Expression.Convert(operand, expression.Type),
-                            Expression.Constant(true, typeof(bool)));
+                        var equalExpression
+                            = Expression.Equal(
+                                operand.Type != typeof(bool)
+                                    ? Expression.Convert(operand, typeof(bool))
+                                    : operand,
+                                Expression.Constant(true, typeof(bool)));
+
+                        return equalExpression.Type == expression.Type
+                            ? (Expression)equalExpression
+                            : Expression.Convert(equalExpression, expression.Type);
                     }
                 }
                 else
                 {
                     if (IsSearchCondition(expression))
                     {
-                        if (expression.NodeType == ExpressionType.Not)
+                        switch (expression.NodeType)
                         {
-                            return Expression.Condition(
-                                operand,
-                                Expression.Constant(false, typeof(bool)),
-                                Expression.Constant(true, typeof(bool)));
-                        }
-
-                        if (expression.NodeType == ExpressionType.Convert
-                            || expression.NodeType == ExpressionType.ConvertChecked)
-                        {
-                            return Expression.MakeUnary(expression.NodeType, operand, expression.Type);
+                            case ExpressionType.Not:
+                                return Expression.Condition(
+                                    operand,
+                                    Expression.Constant(false, typeof(bool)),
+                                    Expression.Constant(true, typeof(bool)));
+                            case ExpressionType.Convert:
+                            case ExpressionType.ConvertChecked:
+                                return Expression.MakeUnary(expression.NodeType, operand, expression.Type);
                         }
 
                         return Expression.Condition(
@@ -1792,25 +1817,28 @@ namespace Microsoft.EntityFrameworkCore.Query.Sql
                 if (_isSearchCondition)
                 {
                     var parentIsSearchCondition = _isSearchCondition;
+
                     _isSearchCondition = false;
+
                     var newExpression = base.VisitExtension(expression);
+
                     _isSearchCondition = parentIsSearchCondition;
 
-                    return expression is AliasExpression || expression is ColumnExpression || expression is SelectExpression
+                    return expression is AliasExpression
+                           || expression is ColumnExpression
+                           || expression is SelectExpression
                         ? Expression.Equal(newExpression, Expression.Constant(true, typeof(bool)))
                         : newExpression;
                 }
-                else
-                {
-                    if (IsSearchCondition(expression))
-                    {
-                        var newExpression = base.VisitExtension(expression);
 
-                        return Expression.Condition(
-                            newExpression,
-                            Expression.Constant(true),
-                            Expression.Constant(false));
-                    }
+                if (IsSearchCondition(expression))
+                {
+                    var newExpression = base.VisitExtension(expression);
+
+                    return Expression.Condition(
+                        newExpression,
+                        Expression.Constant(true),
+                        Expression.Constant(false));
                 }
 
                 return base.VisitExtension(expression);
@@ -1819,6 +1847,7 @@ namespace Microsoft.EntityFrameworkCore.Query.Sql
             protected override Expression VisitParameter(ParameterExpression expression)
             {
                 var newExpression = base.VisitParameter(expression);
+
                 return _isSearchCondition && (newExpression.Type == typeof(bool))
                     ? Expression.Equal(newExpression, Expression.Constant(true, typeof(bool)))
                     : newExpression;
