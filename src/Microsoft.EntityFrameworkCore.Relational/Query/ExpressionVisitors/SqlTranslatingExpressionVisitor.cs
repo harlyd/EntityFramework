@@ -971,7 +971,7 @@ namespace Microsoft.EntityFrameworkCore.Query.ExpressionVisitors
                     return null;
                 }
 
-                return newLeft != stringCompare.Left 
+                return newLeft != stringCompare.Left
                     || newRight != stringCompare.Right
                         ? new StringCompareExpression(stringCompare.Operator, newLeft, newRight)
                         : expression;
@@ -991,8 +991,8 @@ namespace Microsoft.EntityFrameworkCore.Query.ExpressionVisitors
             var nullConditionalExpression
                 = expression as NullConditionalExpression;
 
-            return nullConditionalExpression != null 
-                ? Visit(nullConditionalExpression.AccessOperation) 
+            return nullConditionalExpression != null
+                ? Visit(nullConditionalExpression.AccessOperation)
                 : base.VisitExtension(expression);
         }
 
@@ -1007,12 +1007,37 @@ namespace Microsoft.EntityFrameworkCore.Query.ExpressionVisitors
         {
             Check.NotNull(expression, nameof(expression));
 
-            var selector
-                = ((expression.ReferencedQuerySource as FromClauseBase)
-                    ?.FromExpression as SubQueryExpression)
-                    ?.QueryModel.SelectClause.Selector;
+            var type = expression.ReferencedQuerySource.ItemType.UnwrapNullableType().UnwrapEnumType();
 
-            return selector != null ? Visit(selector) : null;
+            if (_relationalTypeMapper.FindMapping(type) != null)
+            {
+                var selectExpression = _queryModelVisitor.TryGetQuery(expression.ReferencedQuerySource);
+
+                if (selectExpression != null)
+                {
+                    var subquery = (SelectExpression)selectExpression.Tables.Single();
+
+                    var innerProjectionExpression = subquery.Projection.Single() as AliasExpression;
+                    if (innerProjectionExpression != null)
+                    {
+                        if (innerProjectionExpression.Alias != null)
+                        {
+                            return new ColumnExpression(
+                                innerProjectionExpression.Alias,
+                                innerProjectionExpression.Type,
+                                subquery);
+                        }
+
+                        var newExpression = selectExpression.UpdateColumnExpression(innerProjectionExpression.Expression, subquery);
+                        return new AliasExpression(newExpression)
+                        {
+                            SourceMember = innerProjectionExpression.SourceMember
+                        };
+                    }
+                }
+            }
+
+            return null;
         }
 
         /// <summary>
